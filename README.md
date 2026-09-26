@@ -26,6 +26,12 @@ python3 app.py --db ./data.db --port 8308
 
 - `animal`：个体谱系；`pairing`：配对建议；`transfer`：机构和运输记录。
 
+## 配对核对
+
+- `approve` 时把双方当前的档案版本（`sire_version`/`dam_version`）和谱系摘要（`sire_pedigree`/`dam_pedigree`）快照进配对记录。
+- `complete` 前重新核对：双方仍在园（`active`）、档案版本与批准时一致、亲缘系数不超过阈值（0.125）。
+- 核对不通过时配对保持`approved`并返回冲突（409）；通过后才登记后代，并记录实际核对的双方版本（`verified_sire_version`/`verified_dam_version`）。
+
 ## 主要接口
 
 - `GET /health`：健康检查。

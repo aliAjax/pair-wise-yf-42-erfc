@@ -13,6 +13,9 @@ def _validate_animal(actor, data, lookup):
         raise ValidationError("sex must be male, female or unknown")
 
 
+INBREEDING_THRESHOLD = 0.125
+
+
 def inbreeding_coefficient(sire, dam):
     if not sire or not dam:
         return 1.0
@@ -27,6 +30,15 @@ def inbreeding_coefficient(sire, dam):
     return 0.0
 
 
+def _pedigree_summary(animal):
+    data = animal.get("data", {})
+    return {
+        "id": animal.get("id"),
+        "sire_id": data.get("sire_id"),
+        "dam_id": data.get("dam_id"),
+    }
+
+
 def _validate_pairing(actor, entity, data, lookup):
     sire = _find_one(lookup, "animal", "id", data.get("sire_id"))
     dam = _find_one(lookup, "animal", "id", data.get("dam_id"))
@@ -34,13 +46,40 @@ def _validate_pairing(actor, entity, data, lookup):
         raise ValidationError("pairing requires two existing animals")
     if sire["status"] != "active" or dam["status"] != "active":
         raise ValidationError("pairing animals must be active")
-    if inbreeding_coefficient(sire["data"], dam["data"]) > 0.125:
+    if inbreeding_coefficient(sire["data"], dam["data"]) > INBREEDING_THRESHOLD:
         raise ValidationError("pairing exceeds inbreeding threshold")
-    return {"approved_by": actor.user_id}
+    return {
+        "approved_by": actor.user_id,
+        "sire_version": sire["version"],
+        "dam_version": dam["version"],
+        "sire_pedigree": _pedigree_summary(sire),
+        "dam_pedigree": _pedigree_summary(dam),
+    }
+
+
+def _validate_pairing_completion(actor, entity, data, lookup):
+    approved = entity.get("data", {})
+    sire = _find_one(lookup, "animal", "id", approved.get("sire_id"))
+    dam = _find_one(lookup, "animal", "id", approved.get("dam_id"))
+    if not sire or not dam:
+        raise ConflictError("pairing parent no longer exists")
+    if sire["status"] != "active" or dam["status"] != "active":
+        raise ConflictError("pairing parent is no longer active")
+    if (
+        sire["version"] != approved.get("sire_version")
+        or dam["version"] != approved.get("dam_version")
+    ):
+        raise ConflictError("pairing parent profile changed since approval")
+    if inbreeding_coefficient(sire["data"], dam["data"]) > INBREEDING_THRESHOLD:
+        raise ConflictError("pairing exceeds inbreeding threshold")
+    return {
+        "verified_sire_version": sire["version"],
+        "verified_dam_version": dam["version"],
+    }
 
 
 CUSTOM_CREATE = {'animal': _validate_animal}
-CUSTOM_TRANSITIONS = {('pairing', 'approve'): _validate_pairing}
+CUSTOM_TRANSITIONS = {('pairing', 'approve'): _validate_pairing, ('pairing', 'complete'): _validate_pairing_completion}
 
 
 class RuleEngine:
