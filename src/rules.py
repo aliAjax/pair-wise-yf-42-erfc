@@ -8,6 +8,9 @@ from .domain import (
 )
 
 
+INBREEDING_THRESHOLD = 0.125
+
+
 def _validate_animal(actor, data, lookup):
     if data.get("sex") not in ("male", "female", "unknown"):
         raise ValidationError("sex must be male, female or unknown")
@@ -27,20 +30,117 @@ def inbreeding_coefficient(sire, dam):
     return 0.0
 
 
-def _validate_pairing(actor, entity, data, lookup):
+def _animal_profile(animal):
+    profile = dict(animal["data"])
+    profile["id"] = animal["id"]
+    return profile
+
+
+def pedigree_summary(animal):
+    return {
+        "id": animal["id"],
+        "sex": animal["data"].get("sex"),
+        "sire_id": animal["data"].get("sire_id"),
+        "dam_id": animal["data"].get("dam_id"),
+    }
+
+
+def _pairing_animals(data, lookup):
     sire = _find_one(lookup, "animal", "id", data.get("sire_id"))
     dam = _find_one(lookup, "animal", "id", data.get("dam_id"))
     if not sire or not dam:
         raise ValidationError("pairing requires two existing animals")
+    return sire, dam
+
+
+def _approve_pairing(actor, entity, data, lookup):
+    sire, dam = _pairing_animals(data, lookup)
     if sire["status"] != "active" or dam["status"] != "active":
         raise ValidationError("pairing animals must be active")
-    if inbreeding_coefficient(sire["data"], dam["data"]) > 0.125:
+    coefficient = inbreeding_coefficient(
+        _animal_profile(sire), _animal_profile(dam)
+    )
+    if coefficient > INBREEDING_THRESHOLD:
         raise ValidationError("pairing exceeds inbreeding threshold")
-    return {"approved_by": actor.user_id}
+    return {
+        "approved_by": actor.user_id,
+        "sire_version": sire["version"],
+        "dam_version": dam["version"],
+        "sire_pedigree": pedigree_summary(sire),
+        "dam_pedigree": pedigree_summary(dam),
+        "inbreeding_coefficient": coefficient,
+    }
+
+
+def _archive_conflicts(role, animal, approved_version):
+    conflicts = []
+    if approved_version is None:
+        conflicts.append(role + " approval archive snapshot is missing")
+    elif animal["version"] != approved_version:
+        conflicts.append(
+            "%s archive changed: version %s at approval, %s now"
+            % (role, approved_version, animal["version"])
+        )
+    if animal["status"] != "active":
+        conflicts.append(
+            "%s is no longer active (status %s)" % (role, animal["status"])
+        )
+    return conflicts
+
+
+def _complete_pairing(actor, entity, data, lookup):
+    pairing = entity["data"]
+    sire_id = pairing.get("sire_id")
+    dam_id = pairing.get("dam_id")
+    sire = _find_one(lookup, "animal", "id", sire_id) if sire_id else None
+    dam = _find_one(lookup, "animal", "id", dam_id) if dam_id else None
+
+    conflicts = []
+    if not sire:
+        conflicts.append(
+            "sire %s is no longer in the collection" % (sire_id or "unknown")
+        )
+    if not dam:
+        conflicts.append(
+            "dam %s is no longer in the collection" % (dam_id or "unknown")
+        )
+    if sire:
+        conflicts.extend(
+            _archive_conflicts("sire", sire, pairing.get("sire_version"))
+        )
+    if dam:
+        conflicts.extend(
+            _archive_conflicts("dam", dam, pairing.get("dam_version"))
+        )
+
+    coefficient = None
+    if sire and dam:
+        coefficient = inbreeding_coefficient(
+            _animal_profile(sire), _animal_profile(dam)
+        )
+        if coefficient > INBREEDING_THRESHOLD:
+            conflicts.append(
+                "inbreeding coefficient %s exceeds threshold %s"
+                % (coefficient, INBREEDING_THRESHOLD)
+            )
+
+    if conflicts:
+        raise ConflictError(
+            "pairing completion check failed: " + "; ".join(conflicts)
+        )
+
+    return {
+        "verified_sire_version": sire["version"],
+        "verified_dam_version": dam["version"],
+        "verified_inbreeding_coefficient": coefficient,
+    }
 
 
 CUSTOM_CREATE = {'animal': _validate_animal}
-CUSTOM_TRANSITIONS = {('pairing', 'approve'): _validate_pairing}
+CUSTOM_TRANSITIONS = {
+    ('pairing', 'approve'): _approve_pairing,
+    ('pairing', 'complete'): _complete_pairing,
+}
 
 
 class RuleEngine:
